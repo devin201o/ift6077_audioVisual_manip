@@ -1,53 +1,44 @@
-# Cutout Lab (Electron + SAM 2.1 Small)
+# Cutout Lab
 
-Local desktop app: open an image or video, click an object to select it, click again to cycle through
-bigger masks (part → sub-object → whole object), drag the cutout out of the frame. All inference runs
-natively on this machine with ONNX Runtime. No network inference, no API keys.
+Desktop app (Electron + SAM 2.1 Small). Open an image or video, click an object to select it, click again for a bigger mask, and drag the cutout out of the frame. Inference runs locally with ONNX Runtime: no network, no API keys.
 
-## Setup
+## Run it (macOS and Windows)
+
+You need [Node.js](https://nodejs.org) 20.19 or newer and about 200 MB of free disk space.
 
 ```sh
-npm install          # also downloads the Electron binary (postinstall)
-npm run fetch-models # one-off, ~185 MB into ./models (not committed)
+git clone https://github.com/devin201o/ift6077_audioVisual_manip.git
+cd ift6077_audioVisual_manip
+npm install
+npm run fetch-models   # one-off download of the model files (~185 MB) into ./models
 npm run dev
 ```
 
-If `models/` is missing, the app shows `SAM 2.1 model files missing. Run: npm run fetch-models`.
+The same commands work in macOS Terminal, Windows PowerShell and cmd. If the app shows "SAM 2.1 model files missing", run `npm run fetch-models` again.
 
-## Model
-
-SAM 2.1 Hiera-Small, ONNX export from `onnx-community/sam2.1-hiera-small-ONNX` (fp32):
-`vision_encoder.onnx(+_data)` (image encoder, once per frame) and `prompt_encoder_mask_decoder.onnx(+_data)`
-(per click). The embedding stays cached in the main process; only the decoder runs per click.
-
-## Execution providers
-
-Default is **CPU** (fastest here: ~0.65–0.9 s encode, ~15 ms decode on Apple Silicon; CoreML measured 4–30 s per
-encode because the graph splits into ~130 partitions). Switch with an env var:
-
-```sh
-SAM_EP=cpu    npm run dev   # default
-SAM_EP=coreml npm run dev   # CoreML first, falls back to CPU if the session fails to create
-SAM_DEBUG=1   npm run dev   # logs EP, encode/decode ms, mask count/areas/scores
-```
+Apple Silicon and Windows x64/arm64 are supported. The CPU is used by default; the first encode of each frame takes roughly 1 s or more depending on the machine.
 
 ## Controls
 
-- Click: select the smallest mask. Click inside the selection: next larger mask (wraps). Click outside: new selection.
-  Click background or press Esc: clear. Mouse movement alone does nothing.
-- Press and drag (>4 px): lift the cutout (selects the object under the press first if nothing is selected there).
-- Dropped cutouts: plain drag repositions; **Option-drag** starts a native OS drag (Finder, Notes, ...) with a temp PNG.
-  A plain drag that leaves the window cannot turn into a native drag mid-gesture (platform limit).
-- Video: Space play/pause, ←/→ ±10 s, `,` `.` frame step (assumes 30 fps) while paused, `M` mute/unmute (volume slider in the video bar).
-- Timeline under a video: ruler, frame filmstrip, audio waveform and a playhead. View only; click or drag it to seek.
+- **Click:** select the smallest mask. Click inside the selection for the next larger mask. Click the background or press Esc to clear.
+- **Drag (more than 4 px):** lift the cutout and move it around.
+- **Option-drag (macOS) / Alt-drag (Windows):** drag the cutout out into Finder, Explorer or another app as a PNG.
+- **Video:** Space play/pause, ←/→ ±10 s, `,` and `.` step one frame while paused, `M` mute.
 
-## Packaging notes (later)
+## Options
 
-`onnxruntime-node` ships native binaries that cannot load from inside an asar archive: use
-`asarUnpack: ["**/node_modules/onnxruntime-node/**"]` and ship `models/` via `extraResources`
-(`src/main/sam.ts` reads `process.resourcesPath/models` when packaged).
+Set these environment variables before `npm run dev`:
 
-## Layout
+| Variable | Effect |
+| --- | --- |
+| `SAM_DEBUG=1` | Log timings and mask scores |
+| `SAM_EP=coreml` | Try CoreML first (macOS only, usually slower), falls back to CPU |
 
-`src/main` (window, IPC, `sam.ts` = ONNX sessions/preprocess/encode/decode), `src/preload` (typed `window.sam`),
-`src/renderer/src` (UI, `segmentation.ts` logits→masks, `cutout.ts`, `video.ts`).
+macOS/Linux: `SAM_DEBUG=1 npm run dev`. PowerShell: `$env:SAM_DEBUG=1; npm run dev`. cmd: `set SAM_DEBUG=1 && npm run dev`.
+
+## Notes
+
+- Video: H.264 MP4 plays everywhere. HEVC `.mov` files may not play on Windows.
+- Model: `onnx-community/sam2.1-hiera-small-ONNX` (fp32), downloaded by `scripts/fetch-models.mjs`.
+- Code layout: `src/main` (window, IPC, `sam.ts` for ONNX), `src/preload` (typed `window.sam`), `src/renderer/src` (UI, masks, cutouts, video).
+- Packaging (not set up yet): `onnxruntime-node` must be unpacked from asar (`asarUnpack: ["**/node_modules/onnxruntime-node/**"]`) and `models/` shipped via `extraResources`.
