@@ -1,0 +1,26 @@
+{
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "broken-image",
+        "value": "*",
+        "files": [
+          "src/renderer/index.html"
+        ],
+        "createdAt": "2026-10-09T04:31:17.997Z",
+        "reason": "assistant: <img id=img hidden> is a runtime placeholder; src is set from the user's opened file in main.ts openFile()"
+      },
+      {
+        "rule": "cramped-padding",
+        "value": "*",
+        "files": [
+          "src/renderer/index.html"
+        ],
+        "createdAt": "2026-10-09T22:57:24.189Z",
+        "reason": "model decision, not user confirmed: #timeline is an intentional edge-to-edge track (padding would break the px-to-time mapping); only text is canvas ruler labels (inset fixed in timeline.ts) and a centered 'No audio' label"
+      }
+    ]
+  }
+}
