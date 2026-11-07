@@ -4,7 +4,7 @@ Desktop app (Electron + SAM 2.1 Small). Open an image or video, click an object 
 
 ## Run it (macOS and Windows)
 
-You need [Node.js](https://nodejs.org) 20.19 or newer and about 200 MB of free disk space.
+You need [Node.js](https://nodejs.org) 22.6 or newer (`.nvmrc` pins 22) and about 200 MB of free disk space.
 
 ```sh
 git clone https://github.com/devin201o/ift6077_audioVisual_manip.git
@@ -56,3 +56,14 @@ macOS/Linux: `SAM_DEBUG=1 npm run dev`. PowerShell: `$env:SAM_DEBUG=1; npm run d
 - Model: `onnx-community/sam2.1-hiera-small-ONNX` (fp32), downloaded by `scripts/fetch-models.mjs`.
 - Code layout: `src/main` (window, IPC, `sam.ts` for ONNX, `chips.ts` library + queue, `analyzer.ts` OpenRouter, `settings.ts` key), `src/preload` (typed `window.sam`), `src/renderer/src` (UI, dock, masks, cutouts, video), `src/shared` (chip types).
 - Packaging (not set up yet): `onnxruntime-node` must be unpacked from asar (`asarUnpack: ["**/node_modules/onnxruntime-node/**"]`) and `models/` shipped via `extraResources`.
+
+## Windows manual check
+
+CI (macOS + Windows) covers install, typecheck, tests and build, but not the GUI. After changes that touch native or platform code, check on Windows (PowerShell):
+
+1. `npm install`, `npm run fetch-models`, `npm run dev`. Console shows `execution provider: cpu`.
+2. Open an image: click selects an object and mask colours look right (if colour-shifted, see the R/B swap in `preprocess()` in `src/main/sam.ts`).
+3. Open an H.264 MP4: plays, seeks, steps frames.
+4. Drag a cutout to the dock; drop a file on the dock; chip shows a path and **Relink** works.
+5. ⚙ Save an API key (uses Windows DPAPI via `safeStorage`).
+6. `npm run check` passes.
