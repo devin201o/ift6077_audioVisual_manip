@@ -3,7 +3,7 @@ import { fmt } from './video';
 const RULER_H = 18, STRIP_H = 56, WAVE_H = 48;
 
 /** Resolves on `ev` or on `error`, so a broken media element can't hang the build. */
-const once = (el: HTMLMediaElement, ev: string) =>
+export const once = (el: HTMLMediaElement, ev: string) =>
   new Promise<void>((r) => { el.addEventListener(ev, () => r(), { once: true }); el.addEventListener('error', () => r(), { once: true }); });
 
 /** Read-only timeline: ruler, frame filmstrip, audio waveform, playhead. Click/drag seeks `video`. */

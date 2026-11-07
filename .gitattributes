@@ -1,0 +1,8 @@
+* text=auto eol=lf
+*.onnx binary
+*.onnx_data binary
+*.png binary
+*.jpg binary
+*.webp binary
+*.mp4 binary
+*.mov binary

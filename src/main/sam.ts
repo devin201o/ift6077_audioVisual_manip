@@ -59,7 +59,7 @@ export const getStatus = () => status;
 
 /** RGBA frame (native res) -> resize to 1024x1024 -> ImageNet-normalised NCHW float tensor. */
 function preprocess(rgba: Uint8Array, w: number, h: number): ort.Tensor {
-  // nativeImage wants BGRA on macOS: swap R/B into a copy
+  // nativeImage wants BGRA on macOS and Windows: swap R/B into a copy
   const bgra = Buffer.from(rgba.buffer, rgba.byteOffset, rgba.byteLength);
   const buf = Buffer.allocUnsafe(bgra.length);
   for (let i = 0; i < bgra.length; i += 4) { buf[i] = bgra[i + 2]; buf[i + 1] = bgra[i + 1]; buf[i + 2] = bgra[i]; buf[i + 3] = 255; }

@@ -4,3 +4,6 @@ dist/
 models/
 .DS_Store
 .impeccable/hook.cache.json
+Thumbs.db
+*.part
+.env
