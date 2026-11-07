@@ -8,7 +8,8 @@
     "build": "electron-vite build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "fetch-models": "node scripts/fetch-models.mjs",
-    "postinstall": "node node_modules/electron/install.js"
+    "postinstall": "node node_modules/electron/install.js",
+    "check": "node --no-warnings --experimental-strip-types src/main/validate.check.ts"
   },
   "dependencies": {
     "onnxruntime-node": "^1.30.0"

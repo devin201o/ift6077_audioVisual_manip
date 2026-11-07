@@ -1,17 +1,27 @@
 import type { Mask } from './segmentation';
+import type { AddInput } from '../../shared/chip';
+import { once } from './timeline';
 
 export interface Cutout { blob: Blob; x: number; y: number; w: number; h: number } // bbox in native px
 
-/** Transparent PNG of the frame, cropped to the mask bbox, mask edge feathered ~1px. */
-export async function makeCutout(frame: HTMLCanvasElement, mask: Mask): Promise<Cutout | null> {
-  const { data, width: mw, height: mh } = mask;
-  let x0 = mw, y0 = mh, x1 = -1, y1 = -1;
+/** Bounding box (inclusive) and pixel count of a mask; null if empty. */
+export function maskBox({ data, width: mw, height: mh }: Mask) {
+  let x0 = mw, y0 = mh, x1 = -1, y1 = -1, count = 0;
   for (let y = 0; y < mh; y++) for (let x = 0; x < mw; x++) {
     if (!data[y * mw + x]) continue;
+    count++;
     if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; y1 = y;
   }
-  if (x1 < 0) return null;
-  const w = x1 - x0 + 1, h = y1 - y0 + 1, pad = 2; // pad so the blur isn't clipped at the bbox
+  return x1 < 0 ? null : { x0, y0, x1, y1, count };
+}
+
+/** Transparent PNG of the frame, cropped to the mask bbox, mask edge feathered ~1px. */
+export async function makeCutout(frame: HTMLCanvasElement, mask: Mask): Promise<Cutout | null> {
+  const box = maskBox(mask);
+  if (!box) return null;
+  const { data, width: mw } = mask;
+  const { x0, y0 } = box;
+  const w = box.x1 - x0 + 1, h = box.y1 - y0 + 1, pad = 2; // pad so the blur isn't clipped at the bbox
 
   const m = new ImageData(w + pad * 2, h + pad * 2);
   for (let y = 0; y < h; y++) for (let x = 0; x < w; x++)
@@ -30,60 +40,70 @@ export async function makeCutout(frame: HTMLCanvasElement, mask: Mask): Promise<
   return { blob, x: x0 - pad, y: y0 - pad, w: out.width, h: out.height };
 }
 
-// --- floating layers -------------------------------------------------------
-
-const layers = new Set<HTMLImageElement>();
-let layerDragging = false;
-export const isLayerDragging = () => layerDragging;
-
-/**
- * A dropped cutout. Plain drag repositions it inside the window (pointer events).
- * Option-drag starts a native OS drag through the main process (temp PNG file), so it can be dropped into Finder etc.
- * Note: a native drag can only start from a dragstart gesture, so a plain drag that leaves the window cannot be
- * converted into a native drag mid-gesture.
- */
-export function addLayer(c: Cutout, left: number, top: number, width: number, height: number) {
-  const img = document.createElement('img');
-  const url = URL.createObjectURL(c.blob);
-  img.src = url;
-  img.className = 'cutout';
-  img.draggable = true; // native drag only starts for Option-drags; plain presses preventDefault below
-  Object.assign(img.style, { left: `${left}px`, top: `${top}px`, width: `${width}px`, height: `${height}px` });
-  document.body.appendChild(img);
-  layers.add(img);
-
-  let fileId: number | undefined;
-  c.blob.arrayBuffer().then((buf) => window.sam.saveCutout(buf)).then((id) => (fileId = id));
-
-  img.addEventListener('pointerdown', (e) => {
-    if (e.button !== 0) return;
-    if (e.altKey) return; // Option: let the browser fire dragstart -> native OS drag
-    e.preventDefault(); // suppresses the compat mousedown, so no native drag starts
-    try { img.setPointerCapture(e.pointerId); } catch { /* window listeners cover this */ }
-    layerDragging = true;
-    img.classList.add('lifting');
-    const dx = e.clientX - img.offsetLeft, dy = e.clientY - img.offsetTop;
-    const move = (m: PointerEvent) => { img.style.left = `${m.clientX - dx}px`; img.style.top = `${m.clientY - dy}px`; };
-    const up = () => {
-      layerDragging = false;
-      img.classList.remove('lifting');
-      window.removeEventListener('pointermove', move);
-      window.removeEventListener('pointerup', up);
-      window.removeEventListener('pointercancel', up);
-    };
-    window.addEventListener('pointermove', move);
-    window.addEventListener('pointerup', up);
-    window.addEventListener('pointercancel', up);
-  });
-  img.addEventListener('dragstart', (e) => {
-    e.preventDefault(); // hand over to Electron's native drag
-    if (fileId !== undefined) window.sam.startDrag(fileId);
-  });
-  return img;
+/** Scale any drawable so its long edge is at most `long` px (never upscales) and encode it. */
+export function downscale(src: CanvasImageSource, w: number, h: number, long: number, type = 'image/webp', q = 0.85): Promise<Blob> {
+  const s = Math.min(1, long / Math.max(w, h));
+  const c = document.createElement('canvas');
+  c.width = Math.max(1, Math.round(w * s)); c.height = Math.max(1, Math.round(h * s));
+  c.getContext('2d')!.drawImage(src, 0, 0, c.width, c.height);
+  return new Promise((r) => c.toBlob((b) => r(b!), type, q));
 }
 
-export function clearLayers() {
-  for (const l of layers) { URL.revokeObjectURL(l.src); l.remove(); }
-  layers.clear();
-  window.sam.clearCutouts();
+// ---- chip inputs: the one place that turns media into an AddInput (thumbnail + images to upload) ------------------
+export interface Prepared { input: AddInput; thumb: Blob }
+export interface Src { path: string | null; name: string; media: 'image' | 'video' }
+
+const THUMB = 256, UPLOAD = 1024; // plumbing only: no image analysis happens locally
+const buf = (b: Blob) => b.arrayBuffer();
+const px = (v: CanvasImageSource & { width?: number }, w: number, h: number, long: number) => downscale(v, w, h, long);
+
+/** Cutout + its mask, bbox and the full scene. Dropping a selection on the dock and "+ > Object" both land here. */
+export async function objectInput(frame: HTMLCanvasElement, mask: Mask, c: Cutout, click: { x: number; y: number }, frameTime: number | null, src: Src): Promise<Prepared> {
+  const box = maskBox(mask)!, { width: w, height: h } = frame;
+  const bm = await createImageBitmap(c.blob);
+  const mc = new OffscreenCanvas(mask.width, mask.height), id = new ImageData(mask.width, mask.height);
+  for (let i = 0; i < mask.data.length; i++) id.data.set(mask.data[i] ? [255, 255, 255, 255] : [0, 0, 0, 255], i * 4);
+  mc.getContext('2d')!.putImageData(id, 0, 0);
+  const [thumb, obj, scene, maskPng] = await Promise.all([px(bm, bm.width, bm.height, THUMB), px(bm, bm.width, bm.height, UPLOAD), px(frame, w, h, UPLOAD), mc.convertToBlob({ type: 'image/png' })]);
+  return {
+    thumb,
+    input: {
+      kind: 'object', source: { ...src, frameTime, click, w, h },
+      object: { bbox: { x: box.x0 / w, y: box.y0 / h, w: (box.x1 - box.x0 + 1) / w, h: (box.y1 - box.y0 + 1) / h }, area: box.count / (w * h) },
+      thumb: await buf(thumb), cutout: await buf(c.blob), mask: await buf(maskPng), uploads: [await buf(obj), await buf(scene)],
+    },
+  };
+}
+
+/** A whole frame (video at frameTime, or an image with frameTime null). */
+export async function frameInput(frame: HTMLCanvasElement, frameTime: number | null, src: Src): Promise<Prepared> {
+  const { width: w, height: h } = frame;
+  const [thumb, up] = await Promise.all([px(frame, w, h, THUMB), px(frame, w, h, UPLOAD)]);
+  return { thumb, input: { kind: 'image', source: { ...src, frameTime, click: null, w, h }, object: null, thumb: await buf(thumb), uploads: [await buf(up)] } };
+}
+
+/** A dropped file: an image, or a video as a clip with 3 frames (10/50/90 %). */
+export async function fileInput(file: File, path: string): Promise<Prepared> {
+  const src: Src = { path: path || null, name: file.name, media: file.type.startsWith('video/') ? 'video' : 'image' };
+  if (src.media === 'image') {
+    const b = await createImageBitmap(file);
+    const [thumb, up] = await Promise.all([px(b, b.width, b.height, THUMB), px(b, b.width, b.height, UPLOAD)]);
+    return { thumb, input: { kind: 'image', source: { ...src, frameTime: null, click: null, w: b.width, h: b.height }, object: null, thumb: await buf(thumb), uploads: [await buf(up)] } };
+  }
+  const v = document.createElement('video'), url = URL.createObjectURL(file);
+  v.muted = true; v.preload = 'auto'; v.src = url;
+  try {
+    await once(v, 'loadeddata');
+    if (!v.videoWidth) throw new Error('unplayable video');
+    const ups: Blob[] = [];
+    for (const f of [0.1, 0.5, 0.9]) {
+      if (v.duration) { v.currentTime = v.duration * f; await once(v, 'seeked'); }
+      ups.push(await px(v, v.videoWidth, v.videoHeight, UPLOAD));
+    }
+    const thumb = await createImageBitmap(ups[0]).then((b) => px(b, b.width, b.height, THUMB));
+    return {
+      thumb,
+      input: { kind: 'clip', source: { ...src, frameTime: null, click: null, w: v.videoWidth, h: v.videoHeight }, object: null, thumb: await buf(thumb), uploads: await Promise.all(ups.map(buf)) },
+    };
+  } finally { v.removeAttribute('src'); v.load(); URL.revokeObjectURL(url); }
 }

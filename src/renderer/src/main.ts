@@ -1,12 +1,16 @@
 import { encodeFrame, segmentAt, type Mask } from './segmentation';
-import { makeCutout, addLayer, clearLayers, isLayerDragging } from './cutout';
+import { makeCutout, maskBox, objectInput, frameInput, type Cutout, type Prepared, type Src } from './cutout';
+import { setupDock } from './dock';
+import { setupSettings } from './settings';
 import { setupVideo } from './video';
 import { setupTimeline } from './timeline';
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const stage = $('stage'), img = $<HTMLImageElement>('img'), vid = $<HTMLVideoElement>('vid');
 const overlay = $<HTMLCanvasElement>('overlay'), bar = $('bar'), statusEl = $('status');
-const octx = overlay.getContext('2d')!;
+const octx = overlay.getContext('2d')!, pill = $('modepill'), addSel = $('addsel');
+const settings = setupSettings();
+const dock = setupDock(() => settings.open());
 const setStatus = (s: string) => (statusEl.textContent = s);
 
 // ---- state ------------------------------------------------------------------
@@ -20,6 +24,10 @@ let sel: { masks: Mask[]; level: number } | null = null;
 let glow: HTMLCanvasElement | null = null; // pre-rendered glow for the shown mask, in stage CSS px
 let dragging = false;
 let objectUrl = '';
+let curSrc: Src | null = null; // provenance of the open file
+let toDock = false; // "+ > Object" mode: the confirmed selection becomes a chip
+let lastClick = { x: 0, y: 0 }; // last click in native px: provenance for object chips
+let box: ReturnType<typeof maskBox> = null, boxFor: Mask | null = null; // bbox of the shown mask (for the confirm button)
 
 const shown = () => (sel ? sel.masks[sel.level] : null);
 const active = () => modelReady && ready && (kind === 'image' || (kind === 'video' && vid.paused));
@@ -83,7 +91,25 @@ function render() {
   if (overlay.width !== w * dpr || overlay.height !== h * dpr) { overlay.width = w * dpr; overlay.height = h * dpr; }
   octx.setTransform(dpr, 0, 0, dpr, 0, 0);
   octx.clearRect(0, 0, w, h);
-  if (glow) octx.drawImage(glow, 0, 0, w, h);
+  if (glow && !dragging) octx.drawImage(glow, 0, 0, w, h); // selection stays but is hidden while its cutout is carried
+  placeAdd();
+}
+/** "Add to dock" button just below the selection, kept inside the stage. */
+function placeAdd() {
+  const m = shown();
+  addSel.hidden = !(toDock && m && !dragging);
+  if (addSel.hidden) return;
+  if (m !== boxFor) { boxFor = m; box = maskBox(m!); }
+  if (!box) { addSel.hidden = true; return; }
+  const g = geom();
+  addSel.style.left = `${Math.min(Math.max(g.offX + ((box.x0 + box.x1 + 1) / 2) * g.scale, 70), stage.clientWidth - 70)}px`;
+  addSel.style.top = `${Math.min(g.offY + (box.y1 + 1) * g.scale + 8, stage.clientHeight - 40)}px`;
+}
+function setMode(on: boolean, note = '') {
+  toDock = on;
+  pill.hidden = !on;
+  pill.textContent = `Selecting for dock${note} — click an object, click again to grow · Enter to add · Esc to exit`;
+  render();
 }
 function setShown() {
   const m = shown();
@@ -96,7 +122,7 @@ function clearAll() { sel = null; glow = null; render(); }
 // ---- embedding lifecycle -----------------------------------------------------------
 /** Invalidate everything tied to the previous frame. */
 function invalidate(msg: string) {
-  req++; ready = false; clearAll(); setStatus(msg); updateCursor();
+  req++; ready = false; setMode(false); clearAll(); setStatus(msg); updateCursor();
 }
 async function prepare() {
   const my = ++req;
@@ -128,16 +154,19 @@ async function select(p: { x: number; y: number }): Promise<Mask[] | null> {
   return my === req && masks ? masks : null;
 }
 
-// ---- pointer: click / cycle / lift -------------------------------------------------
+// ---- pointer: click / cycle / carry ------------------------------------------------
+// A press that moves > 4px lifts the cutout as a ghost that follows the pointer. Releasing over the dock adds a chip;
+// anywhere else (or Esc) the ghost flies back and vanishes. The selection stays in every case.
 // No pointermove handling outside a press: moving over the frame does nothing.
-type Down = { sx: number; sy: number; lx: number; ly: number; p: { x: number; y: number; inside: boolean }; lifted: boolean; ended: boolean; layer?: HTMLImageElement; baseL: number; baseT: number };
+type Down = { sx: number; sy: number; lx: number; ly: number; p: { x: number; y: number; inside: boolean }; lifted: boolean; ended: boolean; cancelled: boolean; expanded: boolean; cut?: Cutout; make?: () => Promise<Prepared>; ghost?: HTMLImageElement; baseL: number; baseT: number };
 let down: Down | null = null;
 
 overlay.addEventListener('pointerdown', (e) => {
   if (!active() || e.button !== 0) return;
+  const p = toNative(e);
   e.preventDefault();
   try { overlay.setPointerCapture(e.pointerId); } catch { /* window listeners cover this */ }
-  down = { sx: e.clientX, sy: e.clientY, lx: e.clientX, ly: e.clientY, p: toNative(e), lifted: false, ended: false, baseL: 0, baseT: 0 };
+  down = { sx: e.clientX, sy: e.clientY, lx: e.clientX, ly: e.clientY, p, lifted: false, ended: false, cancelled: false, expanded: false, baseL: 0, baseT: 0 };
 });
 // Move/up are listened on window, not just the overlay: the drag must keep working when the pointer leaves the
 // stage (setPointerCapture is also set, but window listeners make it independent of capture behaviour).
@@ -145,42 +174,71 @@ window.addEventListener('pointermove', (e) => {
   if (!down || !active()) return;
   down.lx = e.clientX; down.ly = e.clientY;
   if (!down.lifted && down.p.inside && Math.hypot(e.clientX - down.sx, e.clientY - down.sy) > 4) lift(down);
-  if (down.layer) moveLayer(down);
+  if (down.ghost) {
+    moveGhost(down);
+    const over = dock.hit(down.lx, down.ly);
+    if (over && dock.collapsed()) { dock.expand(); down.expanded = true; }
+    dock.setHot(over);
+  }
 });
 
-function moveLayer(d: Down) {
-  d.layer!.style.left = `${d.baseL + d.lx - d.sx}px`;
-  d.layer!.style.top = `${d.baseT + d.ly - d.sy}px`;
+function moveGhost(d: Down) {
+  d.ghost!.style.left = `${d.baseL + d.lx - d.sx}px`;
+  d.ghost!.style.top = `${d.baseT + d.ly - d.sy}px`;
 }
+function stopCarry() { dragging = false; render(); }
 
 async function lift(d: Down) {
   d.lifted = true; dragging = true;
   // pressing outside the selection first selects the object under the press (smallest level)
   if (!inMask(shown(), d.p.x, d.p.y)) {
     const masks = await select(d.p);
-    if (!masks) { dragging = false; return; } // stale
+    if (!masks) return stopCarry(); // stale
     sel = masks.length ? { masks, level: 0 } : null;
     setShown();
-    if (!sel) { dragging = false; return; } // nothing found: no lift
+    if (!sel) return stopCarry(); // nothing found: no lift
   }
-  const c = await makeCutout(frame!, shown()!);
-  if (!c) { dragging = false; return; }
+  lastClick = d.p;
+  const fr = frame!, mask = shown()!, time = kind === 'video' ? vid.currentTime : null, src = curSrc!;
+  const c = await makeCutout(fr, mask);
+  if (!c || d.cancelled) return stopCarry();
   const g = geom();
+  d.cut = c;
+  d.make = () => objectInput(fr, mask, c, { x: d.p.x / fr.width, y: d.p.y / fr.height }, time, src); // taken now: the frame may change before release
   d.baseL = g.rect.left + g.offX + c.x * g.scale;
   d.baseT = g.rect.top + g.offY + c.y * g.scale;
-  d.layer = addLayer(c, d.baseL, d.baseT, c.w * g.scale, c.h * g.scale);
-  d.layer.classList.add('lifting');
-  moveLayer(d);
-  sel = null; glow = null; render(); // object is "picked up": selection goes away
-  if (d.ended) finish(d); // pointer was released while the cutout was still being built
+  const ghost = document.createElement('img');
+  ghost.src = URL.createObjectURL(c.blob); ghost.className = 'ghost';
+  ghost.style.width = `${c.w * g.scale}px`; ghost.style.height = `${c.h * g.scale}px`;
+  document.body.appendChild(ghost);
+  d.ghost = ghost;
+  moveGhost(d);
+  render(); // hide the glow while carried
+  if (d.ended) release(d, d.cancelled); // pointer was released while the cutout was still being built
 }
-function finish(d: Down) {
-  dragging = false;
-  d.layer?.classList.remove('lifting');
+
+async function release(d: Down, cancel: boolean) {
+  const ghost = d.ghost!, c = d.cut!;
+  stopCarry();
+  const over = !cancel && dock.hit(d.lx, d.ly);
+  dock.setHot(false);
+  let anim: Animation;
+  if (over) {
+    const a = ghost.getBoundingClientRect(), r = dock.rect();
+    dock.submit('Object', d.make!);
+    anim = ghost.animate([{ transform: 'scale(1.06)', opacity: 1 }, { transform: `translate(${r.left + r.width / 2 - a.left - a.width / 2}px, ${r.top + r.height / 2 - a.top - a.height / 2}px) scale(.1)`, opacity: 0 }], { duration: 150, easing: 'ease-in' });
+  } else {
+    if (d.expanded) dock.collapse();
+    const g = geom(); // recompute: collapsing the dock resizes the stage
+    anim = ghost.animate([{ opacity: 1 }, { left: `${g.rect.left + g.offX + c.x * g.scale}px`, top: `${g.rect.top + g.offY + c.y * g.scale}px`, width: `${c.w * g.scale}px`, height: `${c.h * g.scale}px`, opacity: 0 }], { duration: 180, easing: 'ease-out' });
+  }
+  await anim.finished.catch(() => {});
+  URL.revokeObjectURL(ghost.src); ghost.remove();
   if (ready) setStatus(readyText());
 }
 
 async function click(p: { x: number; y: number; inside: boolean }) {
+  lastClick = p;
   if (!p.inside) { sel = null; setShown(); return; } // letterbox/background: clear
   if (inMask(shown(), p.x, p.y)) { // inside current selection: next larger level, no decoder run
     sel!.level = (sel!.level + 1) % sel!.masks.length;
@@ -197,15 +255,67 @@ function end(e: PointerEvent) {
   if (!down) return;
   const d = down; down = null; d.ended = true;
   d.lx = e.clientX; d.ly = e.clientY;
+  if (e.type === 'pointercancel') d.cancelled = true;
   try { overlay.releasePointerCapture(e.pointerId); } catch { /* not captured */ }
-  if (d.layer) { moveLayer(d); finish(d); }
+  if (d.ghost) release(d, d.cancelled);
   else if (!d.lifted) { if (e.type === 'pointerup' && active()) click(d.p); } // under 4px: a click
-  // else: lift() is still working and will call finish()
+  // else: lift() is still working and will release when the ghost exists
 }
 window.addEventListener('pointerup', end);
 window.addEventListener('pointercancel', end);
-overlay.addEventListener('dragstart', (e) => e.preventDefault());
 overlay.addEventListener('contextmenu', (e) => e.preventDefault());
+
+// ---- "+" menu: chips from the player -------------------------------------------------
+const time = () => (kind === 'video' ? vid.currentTime : null);
+
+/** Grab the frame being shown. While playing, take the next presented frame and its own timestamp (no pause needed). */
+function grabVideo(): Promise<{ canvas: HTMLCanvasElement; t: number }> {
+  return new Promise((res) => {
+    let done = false;
+    const cap = (t: number) => {
+      if (done) return; done = true;
+      const c = document.createElement('canvas');
+      c.width = vid.videoWidth; c.height = vid.videoHeight;
+      c.getContext('2d')!.drawImage(vid, 0, 0);
+      res({ canvas: c, t });
+    };
+    if (vid.paused) return cap(vid.currentTime);
+    vid.requestVideoFrameCallback((_now, md) => cap(md.mediaTime));
+    setTimeout(() => cap(vid.currentTime), 300); // video paused/ended before another frame was presented
+  });
+}
+function addWholeFrame() {
+  if (!kind || !curSrc) return;
+  const src = curSrc, isVideo = kind === 'video', img0 = img;
+  dock.submit('Frame', async () => {
+    if (isVideo) { const g = await grabVideo(); return frameInput(g.canvas, g.t, src); }
+    const c = document.createElement('canvas');
+    c.width = img0.naturalWidth; c.height = img0.naturalHeight;
+    c.getContext('2d')!.drawImage(img0, 0, 0);
+    return frameInput(c, null, src);
+  });
+}
+function startObjectMode() {
+  if (!kind) return;
+  if (!modelReady) { setStatus('Segmentation model is not ready'); return; }
+  const wasPlaying = kind === 'video' && !vid.paused;
+  if (wasPlaying) vid.pause(); // SAM needs a still frame
+  setMode(true, wasPlaying ? ' (video paused)' : '');
+}
+function addSelection() {
+  const mask = shown(), fr = frame;
+  if (!mask || !fr || !curSrc) return;
+  const src = curSrc, t = time(), pt = { x: lastClick.x / fr.width, y: lastClick.y / fr.height };
+  dock.submit('Object', async () => {
+    const c = await makeCutout(fr, mask);
+    if (!c) throw new Error('empty mask');
+    return objectInput(fr, mask, c, pt, t, src);
+  });
+  setMode(false); // selection stays
+}
+addSel.addEventListener('click', addSelection);
+window.addEventListener('online', () => window.lib.retryNetwork()); // chips that failed only for lack of network
+dock.setMenu([{ label: 'Whole frame', run: addWholeFrame }, { label: 'Object', run: startObjectMode }]);
 
 // ---- video ---------------------------------------------------------------------------
 const tl = setupTimeline($('timeline'), vid);
@@ -213,11 +323,19 @@ const vctl = setupVideo(vid, bar, {
   onTick: () => tl.update(),
   onBusy: () => invalidate(vid.paused ? 'Seeking…' : 'Playing'),
   onFrameReady: () => { if (kind === 'video') prepare(); },
-  isDragging: () => dragging || isLayerDragging(),
+  isDragging: () => dragging,
 });
 window.addEventListener('keydown', (e) => {
+  if ((e.target as HTMLElement).closest('dialog')) return; // dialogs own their keys
   if ((e.target as HTMLElement).tagName === 'INPUT' && (e.target as HTMLInputElement).type !== 'range') return;
-  if (e.key === 'Escape') { if (!dragging) { sel = null; setShown(); } return; }
+  if (e.key === 'Escape') {
+    const d = down;
+    if (d?.lifted) { d.cancelled = true; if (d.ghost) { down = null; release(d, true); } } // cancel the carry; selection stays
+    else if (!sel && toDock) setMode(false);
+    else { sel = null; setShown(); }
+    return;
+  }
+  if (e.key === 'Enter' && toDock && shown()) { e.preventDefault(); addSelection(); return; }
   if (kind === 'video' && vctl.key(e)) e.preventDefault();
 });
 // arrows are 10s skips, not slider nudges (volume slider is the only range input left)
@@ -230,9 +348,10 @@ function openFile(file: File) {
   if (objectUrl) URL.revokeObjectURL(objectUrl);
   objectUrl = URL.createObjectURL(file); // local only, never uploaded
   invalidate('Loading…');
+  curSrc = { path: window.lib.pathFor(file) || null, name: file.name, media: isVideo ? 'video' : 'image' };
   vid.pause(); vid.removeAttribute('src'); img.removeAttribute('src');
   kind = isVideo ? 'video' : 'image';
-  $('hint').hidden = true; stage.hidden = false;
+  $('hint').hidden = true; stage.hidden = false; dock.setPlusEnabled(true);
   img.hidden = isVideo; vid.hidden = !isVideo; bar.hidden = !isVideo; $('timeline').hidden = !isVideo;
   if (isVideo) {
     vid.src = objectUrl;
@@ -247,12 +366,11 @@ $<HTMLInputElement>('file').addEventListener('change', (e) => {
   const f = (e.target as HTMLInputElement).files?.[0]; if (f) openFile(f);
 });
 document.addEventListener('dragover', (e) => { e.preventDefault(); document.body.classList.add('over'); });
-document.addEventListener('dragleave', (e) => { if (!e.relatedTarget) document.body.classList.remove('over'); });
+document.addEventListener('dragleave', (e) => { if (!e.relatedTarget) { document.body.classList.remove('over'); dock.restore(); } });
 document.addEventListener('drop', (e) => {
   e.preventDefault(); document.body.classList.remove('over');
   const f = e.dataTransfer?.files[0]; if (f) openFile(f);
 });
-$('clear').onclick = clearLayers;
 window.addEventListener('resize', () => { glow = shown() ? buildGlow(shown()!) : null; render(); });
 
 // ---- boot --------------------------------------------------------------------------------

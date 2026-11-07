@@ -3,16 +3,16 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' blob: data:; media-src 'self' blob:; style-src 'self' 'unsafe-inline'; script-src 'self'" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' blob: data: chip:; media-src 'self' blob:; style-src 'self' 'unsafe-inline'; script-src 'self'" />
   <title>Cutout Lab</title>
   <link rel="stylesheet" href="/src/style.css" />
 </head>
 <body>
+  <div id="left">
   <header>
     <label class="btn">Choose file
       <input id="file" type="file" accept="image/png,image/jpeg,image/webp,video/mp4,video/quicktime,video/webm" hidden />
     </label>
-    <button id="clear" class="btn">Clear all</button>
     <span id="status">Loading model…</span>
   </header>
   <main>
@@ -20,6 +20,8 @@
       <img id="img" hidden draggable="false" />
       <video id="vid" hidden playsinline></video>
       <canvas id="overlay"></canvas>
+      <div id="modepill" hidden></div>
+      <button id="addsel" hidden>Add to dock ↵</button>
     </div>
     <div id="bar" hidden>
       <button id="back" title="Back 10s">⟲10</button>
@@ -38,6 +40,28 @@
     </div>
     <p id="hint">Drop an image or video here, or choose a file.</p>
   </main>
+  </div>
+  <aside id="dock">
+    <div id="dockhead"><span>Dock</span><div class="dbtns"><button id="dgear" class="btn" title="Settings">⚙</button><button id="dplus" class="btn" title="Add to dock" disabled>+</button><div id="dmenu" hidden></div><button id="dtoggle" class="btn" title="Collapse dock">›</button></div></div>
+    <div id="chips"></div>
+    <p id="dockhint">Drop images, videos or cutouts here</p>
+  </aside>
+  <dialog id="settings">
+    <h3>Settings</h3>
+    <p class="note">Segmentation runs on this computer. Chip analysis is optional and online: it sends a downscaled copy of what you add to the dock to OpenRouter, using your own API key.</p>
+    <label>OpenRouter API key <input id="keyin" type="password" autocomplete="off" spellcheck="false" placeholder="sk-or-…" /></label>
+    <p id="keystate" class="note"></p>
+    <label>Model <input id="modelin" type="text" spellcheck="false" /></label>
+    <p class="note">Any vision model with structured outputs. <a href="https://openrouter.ai/models?supported_parameters=structured_outputs&input_modalities=image" target="_blank" rel="noreferrer">Browse models</a></p>
+    <p id="seterr" class="err" hidden></p>
+    <div class="row"><button id="reall" class="btn" hidden></button></div>
+    <div class="row"><button id="rmkey" class="btn">Remove key</button><span class="grow"></span><button id="setclose" class="btn">Close</button><button id="setsave" class="btn primary">Save</button></div>
+  </dialog>
+  <dialog id="privacy">
+    <h3>Before the first analysis</h3>
+    <p>When you add something to the dock, a downscaled copy (at most 1024 px) of the image or video frames is sent to OpenRouter and to the model provider it routes to. Nothing is sent for media you do not add. Selecting, cutting and playback stay on this computer.</p>
+    <div class="row"><span class="grow"></span><button id="privno" class="btn">Cancel</button><button id="privyes" class="btn primary">Continue</button></div>
+  </dialog>
   <script type="module" src="/src/main.ts"></script>
 </body>
 </html>
